@@ -398,12 +398,12 @@ class CrawlerApp(tk.Tk):
         self._stop_event   = threading.Event()
         self._crawl_thread = None
 
-        # 設定ファイルパス（exeと同じ場所）
+        # アプリケーションディレクトリ（exeまたはスクリプトと同じ場所）
         if getattr(sys, 'frozen', False):
-            app_dir = os.path.dirname(sys.executable)
+            self._app_dir = os.path.dirname(sys.executable)
         else:
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-        self._config_path = os.path.join(app_dir, 'crawler_settings.json')
+            self._app_dir = os.path.dirname(os.path.abspath(__file__))
+        self._config_path = os.path.join(self._app_dir, 'crawler_settings.json')
 
         self._build_ui()
         self._load_settings()
@@ -465,12 +465,12 @@ class CrawlerApp(tk.Tk):
 
         # START_URL
         row_label(cfg_frame, 'クロール開始URL', 0)
-        self.var_url = tk.StringVar(value='https://www.bgu.ac.jp/')
+        self.var_url = tk.StringVar(value='')
         ttk.Entry(cfg_frame, textvariable=self.var_url).grid(row=0, column=1, columnspan=2, sticky='ew')
 
         # OUTPUT_CSV
         row_label(cfg_frame, '出力CSVファイル', 1)
-        self.var_csv = tk.StringVar(value=os.path.join(os.path.expanduser('~'), 'Desktop', 'site_crawl_result.csv'))
+        self.var_csv = tk.StringVar(value=os.path.join(self._app_dir, 'site_crawl_result.csv'))
         ttk.Entry(cfg_frame, textvariable=self.var_csv).grid(row=1, column=1, sticky='ew')
         ttk.Button(cfg_frame, text='参照…', command=self._browse_csv, width=7).grid(row=1, column=2, padx=(4, 0))
 
