@@ -114,6 +114,53 @@ def extract_links(html, current_url, base_domain):
                 links.add(abs_url)
     return links
 
+def detect_js_includes(html):
+    """HTMLからJSインクルードパターン（.load(), fetch()等）のパスを検出"""
+    paths = set()
+    # jQuery .load("path") パターン
+    for m in re.findall(r'\.load\(\s*["\']([^"\']+)["\']', html):
+        if m.endswith(('.html', '.htm', '.php', '.shtml')):
+            paths.add(m)
+    # fetch("path") パターン
+    for m in re.findall(r'fetch\(\s*["\']([^"\']+)["\']', html):
+        if m.endswith(('.html', '.htm', '.php', '.shtml')):
+            paths.add(m)
+    return paths
+
+
+def fetch_js_includes(session, html, current_url, base_domain, timeout_sec, cache, log_fn):
+    """JSインクルードファイルを取得し、追加リンクを抽出して返す"""
+    include_paths = detect_js_includes(html)
+    if not include_paths:
+        return set()
+
+    extra_links = set()
+    for path in include_paths:
+        abs_url = urljoin(current_url, path)
+        if abs_url in cache:
+            # キャッシュ済みのリンクを再利用
+            extra_links |= cache[abs_url]
+            continue
+        try:
+            resp = session.get(abs_url, timeout=timeout_sec,
+                               headers={'X-Requested-With': 'XMLHttpRequest',
+                                        'Referer': current_url})
+            if resp.status_code == 200 and 'text/html' in resp.headers.get('Content-Type', ''):
+                # リダイレクトで元ページに戻された場合はスキップ
+                if normalize_url(resp.url) == normalize_url(current_url):
+                    cache[abs_url] = set()
+                    continue
+                links = extract_links(resp.text, current_url, base_domain)
+                cache[abs_url] = links
+                extra_links |= links
+                log_fn(f'  JSインクルード検出: {path} → リンク{len(links)}件')
+            else:
+                cache[abs_url] = set()
+        except Exception:
+            cache[abs_url] = set()
+    return extra_links
+
+
 def get_path_segments(url):
     path = urlparse(url).path
     return [s for s in path.strip('/').split('/') if s]
@@ -203,6 +250,7 @@ def run_crawler(config, log_fn, done_fn, stop_event):
     visited = set()
     queue   = deque([start_url])
     results = []
+    js_include_cache = {}  # JSインクルードファイルのキャッシュ
 
     # --- フィルタ用ヘルパー ---
     collapse_seen = set()       # まとめ済みグループ
@@ -349,6 +397,9 @@ def run_crawler(config, log_fn, done_fn, stop_event):
             log_fn(f'[{count:4d}] OK {url}')
 
         new_links = extract_links(html, final_url, base_domain)
+        # JSインクルードファイル（.load()等で読み込まれるヘッダー/フッター）からもリンク抽出
+        new_links |= fetch_js_includes(session, html, final_url, base_domain,
+                                       timeout_sec, js_include_cache, log_fn)
         for link in sorted(new_links):
             if link not in visited and not is_filtered_url(link) and not is_collapse_skip(link):
                 queue.append(link)
