@@ -14,6 +14,7 @@ import re
 import ssl
 import sys
 import time
+import random
 import os
 from datetime import datetime
 from requests.adapters import HTTPAdapter
@@ -171,19 +172,30 @@ def fetch_with_retry(session, url, timeout_sec, retry_count, retry_delay_sec, lo
     for attempt in range(1, retry_count + 1):
         try:
             resp = session.get(url, timeout=timeout_sec, allow_redirects=True)
+            # 429/503 は Retry-After ヘッダがあれば従い、なければ指数バックオフ
+            if resp.status_code in (429, 503):
+                ra = resp.headers.get('Retry-After')
+                wait = int(ra) if ra and ra.isdigit() else retry_delay_sec * (2 ** (attempt - 1))
+                wait = min(wait, 120)
+                if attempt < retry_count:
+                    log_fn(f'  HTTP {resp.status_code} (試行{attempt}/{retry_count}) — {wait}秒後リトライ')
+                    time.sleep(wait)
+                    continue
             return resp, None
         except requests.Timeout:
             last_error = 'TIMEOUT'
+            wait = min(retry_delay_sec * (2 ** (attempt - 1)) + random.uniform(0, 1), 60)
             if attempt < retry_count:
-                log_fn(f'  TIMEOUT (試行{attempt}/{retry_count}) — {retry_delay_sec}秒後リトライ')
-                time.sleep(retry_delay_sec)
+                log_fn(f'  TIMEOUT (試行{attempt}/{retry_count}) — {wait:.1f}秒後リトライ')
+                time.sleep(wait)
             else:
                 log_fn(f'  TIMEOUT (試行{attempt}/{retry_count}、リトライ上限)')
         except Exception as e:
             last_error = f'ERROR: {e}'
+            wait = min(retry_delay_sec * (2 ** (attempt - 1)) + random.uniform(0, 1), 60)
             if attempt < retry_count:
-                log_fn(f'  ERROR (試行{attempt}/{retry_count}) {e} — {retry_delay_sec}秒後リトライ')
-                time.sleep(retry_delay_sec)
+                log_fn(f'  ERROR (試行{attempt}/{retry_count}) {e} — {wait:.1f}秒後リトライ')
+                time.sleep(wait)
             else:
                 log_fn(f'  ERROR (試行{attempt}/{retry_count}、リトライ上限) {e}')
     return None, last_error
@@ -242,14 +254,29 @@ def run_crawler(config, log_fn, done_fn, stop_event):
         log_fn('ページネーションスキップ: ON')
     log_fn('-' * 60)
 
+    # 注意: 同時接続は意図的に1本に制限している。
+    # 並列化するとサーバ負荷が delay 設定を簡単に突破するため、
+    # 高速化したい場合は delay を下げるのではなく対象サイトの管理者に確認のこと。
     session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0 (compatible; SiteCrawler/1.0)'})
+    session.headers.update({'User-Agent': 'SiteCrawlerBot/1.0 (+https://github.com/uriu1709/site-crawler)'})
     session.mount('https://', _SSLAdapter())
 
     rp = load_robots(session, base_url, timeout_sec, log_fn) if respect_robots else None
 
+    # robots.txt の Crawl-delay が設定値より大きければ優先する
+    effective_delay = delay_sec
+    if rp:
+        try:
+            crawl_delay = rp.crawl_delay('*')
+            if crawl_delay and float(crawl_delay) > delay_sec:
+                effective_delay = float(crawl_delay)
+                log_fn(f'robots.txt の Crawl-delay={crawl_delay}秒を採用（設定値 {delay_sec}秒より優先）')
+        except Exception:
+            pass
+
     visited = set()
     queue   = deque([start_url])
+    queued  = {start_url}  # キューに追加済みURLのセット（O(1)重複チェック用）
     results = []
     js_include_cache = {}  # JSインクルードファイルのキャッシュ
 
@@ -345,29 +372,33 @@ def run_crawler(config, log_fn, done_fn, stop_event):
             status = 'TIMEOUT' if error == 'TIMEOUT' else 'ERROR'
             log_fn(f'[{count:4d}] {status} {url}')
             results.append({'url': url, 'status': status, 'title': '', 'description': '', 'h1': ''})
-            time.sleep(delay_sec)
+            time.sleep(effective_delay)
             continue
 
         final_url = normalize_url(resp.url)
-        # リダイレクト先URLも visited に追加（重複記録を防止）
+        # リダイレクト先が処理済みの場合は重複記録を防ぐためスキップ
         if final_url != url:
+            if final_url in visited:
+                log_fn(f'[{count:4d}] SKIP:リダイレクト先処理済 {url} → {final_url}')
+                time.sleep(effective_delay)
+                continue
             visited.add(final_url)
 
         if urlparse(final_url).netloc != base_domain:
             log_fn(f'[{count:4d}] SKIP:外部リダイレクト {url}')
-            time.sleep(delay_sec)
+            time.sleep(effective_delay)
             continue
 
         if resp.status_code != 200:
             log_fn(f'[{count:4d}] HTTP_{resp.status_code} {url}')
             results.append({'url': url, 'status': resp.status_code, 'title': '', 'description': '', 'h1': ''})
-            time.sleep(delay_sec)
+            time.sleep(effective_delay)
             continue
 
         content_type = resp.headers.get('Content-Type', '')
         if 'text/html' not in content_type:
             log_fn(f'[{count:4d}] SKIP:非HTML ({content_type.split(";")[0].strip()}) {url}')
-            time.sleep(delay_sec)
+            time.sleep(effective_delay)
             continue
 
         # ヘッダーに文字コード指定がない場合はUTF-8として処理
@@ -400,12 +431,13 @@ def run_crawler(config, log_fn, done_fn, stop_event):
         new_links = extract_links(html, final_url, base_domain)
         # JSインクルードファイル（.load()等で読み込まれるヘッダー/フッター）からもリンク抽出
         new_links |= fetch_js_includes(session, html, final_url, base_domain,
-                                       timeout_sec, delay_sec, js_include_cache, log_fn)
+                                       timeout_sec, effective_delay, js_include_cache, log_fn)
         for link in sorted(new_links):
-            if link not in visited and not is_filtered_url(link) and not is_collapse_skip(link):
+            if link not in visited and link not in queued and not is_filtered_url(link) and not is_collapse_skip(link):
                 queue.append(link)
+                queued.add(link)
 
-        time.sleep(delay_sec)
+        time.sleep(effective_delay)
 
     # CSV出力
     # seg0=ルート, seg1=第1階層, ... segN=最深階層（タイトルを最下層セルに配置）
@@ -532,8 +564,8 @@ class CrawlerApp(tk.Tk):
         ttk.Spinbox(cfg_frame, textvariable=self.var_max, from_=1, to=99999, width=8).grid(row=2, column=1, sticky='w')
 
         row_label(cfg_frame, 'リクエスト間隔（秒）', 3)
-        self.var_delay = tk.DoubleVar(value=0.5)
-        ttk.Spinbox(cfg_frame, textvariable=self.var_delay, from_=0.0, to=30.0, increment=0.1, format='%.1f', width=8).grid(row=3, column=1, sticky='w')
+        self.var_delay = tk.DoubleVar(value=1.5)
+        ttk.Spinbox(cfg_frame, textvariable=self.var_delay, from_=0.5, to=30.0, increment=0.1, format='%.1f', width=8).grid(row=3, column=1, sticky='w')
 
         # TIMEOUT_SEC
         row_label(cfg_frame, 'タイムアウト（秒）', 4)
