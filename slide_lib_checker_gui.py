@@ -109,9 +109,43 @@ SKIP_EXTENSIONS = {
     '.css', '.js', '.ico', '.woff', '.woff2', '.ttf', '.eot',
 }
 
+# JS/CSS ファイル内のバージョン文字列を探す正規表現
+# 例: /*! Swiper v8.4.5  /  version:"8.4.5"  /  e.version="8.4.5"
+VERSION_IN_CONTENT_RE = re.compile(
+    r'(?:version|VERSION)\s*[:=]\s*["\']v?(\d+\.\d+[\.\d]*)["\']'
+    r'|/\*!?\s*\S+\s+v?(\d+\.\d+[\.\d]*)',
+    re.I,
+)
+
 # ========================================
 # コアロジック（クローラー共通）
 # ========================================
+def extract_title(html):
+    from html import unescape
+    m = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
+    return unescape(m.group(1).strip()) if m else ''
+
+def fetch_lib_version(url, session, timeout_sec, cache):
+    """JS/CSS ファイルの先頭 8KB からバージョン文字列を取得（キャッシュ付き）"""
+    if url in cache:
+        return cache[url]
+    try:
+        resp = session.get(url, timeout=timeout_sec, stream=True)
+        if resp.status_code == 200:
+            chunk = b''
+            for c in resp.iter_content(8192):
+                chunk = c
+                break
+            content = chunk.decode('utf-8', errors='ignore')
+            m = VERSION_IN_CONTENT_RE.search(content)
+            version = next((g for g in m.groups() if g), '') if m else ''
+        else:
+            version = ''
+    except Exception:
+        version = ''
+    cache[url] = version
+    return version
+
 def normalize_url(url):
     parsed = urlparse(url)
     path = parsed.path
@@ -201,21 +235,22 @@ def fetch_with_retry(session, url, timeout_sec, retry_count, retry_delay_sec, lo
 # ========================================
 # スライドライブラリ検出
 # ========================================
-def detect_slide_libs(html):
+def detect_slide_libs(html, page_url, session, timeout_sec, version_cache):
     """
     HTMLからスライドショーライブラリを検出する。
 
     Returns: list of dict
         name     : ライブラリ名
         version  : バージョン文字列（不明の場合は空文字）
-        status   : '使用中' | '読み込みのみ'
+        status   : '使用中' | '初期化のみ（HTML構造なし）' | '読み込みのみ'
         load_url : 検出した script src / link href の URL
     """
-    # <script src> と <link href> を収集
-    load_urls = (
+    # <script src> と <link href> を収集（絶対URLに変換）
+    raw_urls = (
         re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I) +
         re.findall(r'<link[^>]+href=["\']([^"\']+)["\']', html, re.I)
     )
+    load_urls = [urljoin(page_url, u) for u in raw_urls]
 
     # インライン <script> の内容を結合（src 属性のないものだけ）
     inline_js = '\n'.join(
@@ -229,20 +264,27 @@ def detect_slide_libs(html):
         if not matched_url:
             continue
 
-        # バージョン抽出（URL から）
+        # バージョン抽出: まず URL から、なければファイルをフェッチ
         m = lib['ver_re'].search(matched_url)
         version = m.group(1) if m else ''
+        if not version:
+            version = fetch_lib_version(matched_url, session, timeout_sec, version_cache)
 
-        # 使用チェック：インライン初期化コード OR HTML クラス
-        used = bool(
-            lib['init_re'].search(inline_js) or
-            lib['html_re'].search(html)
-        )
+        # 使用チェック（二段階）
+        has_init = bool(lib['init_re'].search(inline_js))
+        has_html = bool(lib['html_re'].search(html))
+
+        if has_html:
+            status = '使用中'
+        elif has_init:
+            status = '初期化のみ（HTML構造なし）'
+        else:
+            status = '読み込みのみ'
 
         results.append({
             'name':     lib['name'],
             'version':  version,
-            'status':   '使用中' if used else '読み込みのみ',
+            'status':   status,
             'load_url': matched_url,
         })
 
@@ -308,12 +350,14 @@ def run_checker(config, log_fn, done_fn, stop_event):
         except Exception:
             pass
 
-    visited = set()
-    queue   = deque([start_url])
-    queued  = {start_url}
-    results = []  # list of dict: url, name, version, status, load_url
+    visited      = set()
+    queue        = deque([start_url])
+    queued       = {start_url}
+    version_cache = {}   # JS/CSS ファイルのバージョンキャッシュ（URL → バージョン文字列）
+    results      = []    # list of dict: url, title, library, version, status, load_url
+    fetch_count  = 0     # リダイレクト元を除いた実フェッチ数（ページ番号・上限管理に使用）
 
-    while queue and len(visited) < max_pages:
+    while queue and fetch_count < max_pages:
         if stop_event.is_set():
             log_fn('\n⛔ 中断されました')
             break
@@ -328,22 +372,27 @@ def run_checker(config, log_fn, done_fn, stop_event):
             continue
 
         visited.add(url)
-        count = len(visited)
 
         resp, error = fetch_with_retry(session, url, timeout_sec, retry_count, retry_delay_sec, log_fn)
 
         if resp is None:
-            log_fn(f'[{count:4d}] {"TIMEOUT" if error == "TIMEOUT" else "ERROR"} {url}')
+            fetch_count += 1
+            log_fn(f'[{fetch_count:4d}] {"TIMEOUT" if error == "TIMEOUT" else "ERROR"} {url}')
             time.sleep(effective_delay)
             continue
 
         final_url = normalize_url(resp.url)
         if final_url != url:
             if final_url in visited:
-                log_fn(f'[{count:4d}] SKIP:リダイレクト先処理済 {url} → {final_url}')
+                # リダイレクト先が処理済み → カウントせずスキップ
+                log_fn(f'       SKIP:リダイレクト先処理済 {url} → {final_url}')
                 time.sleep(effective_delay)
                 continue
             visited.add(final_url)
+
+        # リダイレクト元はカウントせず、ここで初めてカウント
+        fetch_count += 1
+        count = fetch_count
 
         if urlparse(final_url).netloc != base_domain:
             log_fn(f'[{count:4d}] SKIP:外部リダイレクト {url}')
@@ -363,20 +412,21 @@ def run_checker(config, log_fn, done_fn, stop_event):
 
         if resp.encoding is None or resp.encoding.lower() == 'iso-8859-1':
             resp.encoding = resp.apparent_encoding or 'utf-8'
-        html = resp.text
+        html  = resp.text
+        title = extract_title(html)
 
         # ライブラリ検出
-        detected = detect_slide_libs(html)
+        detected = detect_slide_libs(html, final_url, session, timeout_sec, version_cache)
         if detected:
             for d in detected:
-                ver_str    = d['version'] or '不明'
-                status_str = d['status']
-                log_fn(f'[{count:4d}] ✅ {d["name"]} v{ver_str} [{status_str}] {final_url}')
+                ver_str = d['version'] or '不明'
+                log_fn(f'[{count:4d}] ✅ {d["name"]} v{ver_str} [{d["status"]}] {final_url}')
                 results.append({
                     'url':      final_url,
+                    'title':    title,
                     'library':  d['name'],
                     'version':  d['version'],
-                    'status':   status_str,
+                    'status':   d['status'],
                     'load_url': d['load_url'],
                 })
         else:
@@ -392,14 +442,14 @@ def run_checker(config, log_fn, done_fn, stop_event):
         time.sleep(effective_delay)
 
     # CSV 出力
-    fieldnames = ['url', 'library', 'version', 'status', 'load_url']
+    fieldnames = ['url', 'title', 'library', 'version', 'status', 'load_url']
     with open(output_csv, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(results)
 
     log_fn('=' * 60)
-    log_fn(f'✅ チェック完了: {len(visited)}ページ確認')
+    log_fn(f'✅ チェック完了: {fetch_count}ページ確認')
     if results:
         lib_counts = {}
         for r in results:
