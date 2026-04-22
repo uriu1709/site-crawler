@@ -306,6 +306,7 @@ def run_checker(config, log_fn, done_fn, stop_event):
     retry_count     = config['retry_count']
     retry_delay_sec = config['retry_delay_sec']
     respect_robots  = config['respect_robots']
+    exclude_dirs    = config.get('exclude_dirs', [])
 
     # ログファイル
     if getattr(sys, 'frozen', False):
@@ -331,7 +332,13 @@ def run_checker(config, log_fn, done_fn, stop_event):
 
     log_fn(f'チェック開始: {start_url}')
     log_fn(f'ドメイン: {base_domain} / 最大ページ数: {max_pages}')
+    if exclude_dirs:
+        log_fn(f'除外ディレクトリ: {", ".join(exclude_dirs)}')
     log_fn('-' * 60)
+
+    def is_filtered_url(url):
+        path = urlparse(url).path
+        return any(path.startswith(d) for d in exclude_dirs)
 
     # 注意: 同時接続は意図的に1本に制限している。
     session = requests.Session()
@@ -364,6 +371,11 @@ def run_checker(config, log_fn, done_fn, stop_event):
 
         url = queue.popleft()
         if url in visited:
+            continue
+
+        if is_filtered_url(url):
+            visited.add(url)
+            log_fn(f'[SKIP:フィルタ] {url}')
             continue
 
         if rp and not rp.can_fetch('*', url):
@@ -435,7 +447,7 @@ def run_checker(config, log_fn, done_fn, stop_event):
         # リンク抽出・キュー追加
         new_links = extract_links(html, final_url, base_domain)
         for link in sorted(new_links):
-            if link not in visited and link not in queued:
+            if link not in visited and link not in queued and not is_filtered_url(link):
                 queue.append(link)
                 queued.add(link)
 
@@ -472,7 +484,7 @@ class CheckerApp(tk.Tk):
         super().__init__()
         self.title('スライドライブラリチェッカー')
         self.resizable(True, True)
-        self.minsize(640, 600)
+        self.minsize(640, 660)
 
         self._stop_event   = threading.Event()
         self._check_thread = None
@@ -498,11 +510,13 @@ class CheckerApp(tk.Tk):
             if 'retry_count'    in s:  self.var_retry.set(s['retry_count'])
             if 'retry_delay_sec'in s:  self.var_retry_delay.set(s['retry_delay_sec'])
             if 'respect_robots' in s:  self.var_robots.set(s['respect_robots'])
+            if s.get('exclude_dirs'):  self.txt_exclude.insert('1.0', s['exclude_dirs'])
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
             pass
 
     def _save_settings(self, config):
         s = {k: config[k] for k in config}
+        s['exclude_dirs'] = self.txt_exclude.get('1.0', 'end').strip()
         try:
             with open(self._config_path, 'w', encoding='utf-8') as f:
                 json.dump(s, f, ensure_ascii=False, indent=2)
@@ -550,6 +564,15 @@ class CheckerApp(tk.Tk):
         self.var_robots = tk.BooleanVar(value=True)
         ttk.Checkbutton(cfg, variable=self.var_robots).grid(row=7, column=1, sticky='w')
 
+        filter_frame = ttk.LabelFrame(self, text='フィルタ設定', padding=10)
+        filter_frame.pack(fill='x', padx=12, pady=(4, 4))
+        filter_frame.columnconfigure(0, weight=1)
+
+        ttk.Label(filter_frame, text='除外ディレクトリ（1行1パス、例: /news/）',
+                  font=('', 8)).grid(row=0, column=0, sticky='w')
+        self.txt_exclude = tk.Text(filter_frame, height=3, font=('Consolas', 9))
+        self.txt_exclude.grid(row=1, column=0, sticky='ew', pady=(0, 4))
+
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill='x', padx=12, pady=4)
         self.btn_start = ttk.Button(btn_frame, text='▶ チェック開始', command=self._start, width=18)
@@ -595,6 +618,10 @@ class CheckerApp(tk.Tk):
             messagebox.showerror('入力エラー', 'CSVの保存先を指定してください')
             return
 
+        exclude_text = self.txt_exclude.get('1.0', 'end').strip()
+        exclude_dirs = [line.strip() for line in exclude_text.splitlines() if line.strip()]
+        exclude_dirs = [d if d.endswith('/') else d + '/' for d in exclude_dirs]
+
         config = {
             'start_url':       url,
             'output_csv':      csv_path,
@@ -604,6 +631,7 @@ class CheckerApp(tk.Tk):
             'retry_count':     self.var_retry.get(),
             'retry_delay_sec': self.var_retry_delay.get(),
             'respect_robots':  self.var_robots.get(),
+            'exclude_dirs':    exclude_dirs,
         }
         self._save_settings(config)
         self._stop_event.clear()
