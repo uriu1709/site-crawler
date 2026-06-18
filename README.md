@@ -172,14 +172,24 @@ pytest -v
 
 ### exeビルド
 
-PyInstallerで単体exeファイルにビルドする。
+#### かんたんビルド（推奨）
+
+`build.bat` を**ダブルクリック**するだけで、2つのexeが生成される。
+内部で次を自動実行する: Python検出 → 仮想環境（`.venv`）作成 → 依存パッケージ
+インストール → 両 `.spec` を PyInstaller でビルド。完了後 `dist` フォルダが開く。
+
+> 事前に Python 3.10以上のインストールが必要（インストール時に「Add Python to PATH」を
+> 有効にしておくこと）。それ以外の準備は不要。
+
+#### 手動ビルド
 
 ```bash
 pip install pyinstaller
 pyinstaller サイトクローラー.spec
+pyinstaller スライドライブラリチェッカー.spec
 ```
 
-ビルド後、`dist/サイトクローラー.exe` が生成される。
+ビルド後、`dist/サイトクローラー.exe` と `dist/スライドライブラリチェッカー.exe` が生成される。
 
 ### exe実行時の注意
 
