@@ -14,19 +14,33 @@ Webサイトのディレクトリマップ（サイトマップ一覧）を作�
 
 ```
 サイトクローラー/
-├── site_crawler_gui.py    # メインアプリケーション（exe化対象）
-├── サイトクローラー.spec   # PyInstaller ビルド設定
+├── site_crawler_gui.py         # サイトクローラー本体（exe化対象）
+├── slide_lib_checker_gui.py    # スライドライブラリチェッカー本体（exe化対象）
+├── crawler_common.py           # 両ツール共通のネットワーク・HTML解析ロジック（tkinter非依存）
+├── slide_libs.py               # スライドライブラリ検出ロジック（tkinter非依存）
+├── tests/
+│   └── test_pure_functions.py  # 純粋関数の挙動固定テスト（pytest）
+├── .github/workflows/ci.yml    # CI（pytest 自動実行）
+├── requirements.txt            # 実行時依存
+├── requirements-dev.txt        # 開発用依存（pytest, pyinstaller）
+├── サイトクローラー.spec          # PyInstaller ビルド設定
+├── スライドライブラリチェッカー.spec  # PyInstaller ビルド設定
 ├── .gitignore
 └── README.md
 ```
+
+> `crawler_common.py` / `slide_libs.py` は GUI（tkinter）に依存しないため、
+> ヘッドレス環境でも import・テストが可能。GUI ファイルから import して使う。
 
 ### 実行時に生成されるファイル
 
 | ファイル | 説明 |
 |---------|------|
-| `crawler_settings.json` | GUI設定の自動保存（URL、CSV保存先など） |
+| `crawler_settings.json` | サイトクローラーのGUI設定の自動保存（URL、CSV保存先など） |
+| `slidecheck_settings.json` | スライドライブラリチェッカーのGUI設定の自動保存 |
 | `logs/crawl_YYYYMMDD_HHMMSS.log` | クロールログ（日時付き） |
-| 指定したCSVファイル | クロール結果 |
+| `logs/slidecheck_YYYYMMDD_HHMMSS.log` | チェッカーログ（日時付き） |
+| 指定したCSVファイル | 実行結果 |
 
 ## 機能一覧
 
@@ -47,7 +61,7 @@ Webサイトのディレクトリマップ（サイトマップ一覧）を作�
 
 ### エンコーディング対応
 - HTTPヘッダーにcharset指定がない場合（`ISO-8859-1` フォールバック）を検出
-- `chardet` による自動判定（`resp.apparent_encoding`）にフォールバック
+- requests 同梱の文字コード推定（`resp.apparent_encoding`）にフォールバック
 - 日本語サイトの文字化けを防止
 
 ### フィルタ機能
@@ -91,7 +105,7 @@ Webサイトのディレクトリマップ（サイトマップ一覧）を作�
 | 最大ページ数 | 2000 | クロール上限 |
 | リクエスト間隔 | 0.5秒 | ページ間の待機時間 |
 | タイムアウト | 20秒 | 1リクエストのタイムアウト |
-| リトライ回数 | 3回 | エラー時の再試行回数 |
+| 試行回数（リトライ含む） | 3回 | 1リクエストの最大試行回数。最低1（1=リトライなし） |
 | リトライ待機 | 3.0秒 | リトライ前の待機時間 |
 | robots.txtを尊重 | ON | robots.txtに従うか |
 | WordPress投稿自動まとめ | OFF | 日付パーマリンク検出 |
@@ -133,7 +147,7 @@ seg0, seg1, seg2, ..., segN, url, status, title, description, h1
 ## セットアップ
 
 ```bash
-pip install requests
+pip install -r requirements.txt
 ```
 
 ## 実行方法
@@ -141,7 +155,19 @@ pip install requests
 ### スクリプトとして実行
 
 ```bash
-python site_crawler_gui.py
+python site_crawler_gui.py        # サイトクローラー
+python slide_lib_checker_gui.py   # スライドライブラリチェッカー
+```
+
+## テスト
+
+ネットワーク・GUI に依存しない純粋ロジック（`crawler_common.py` / `slide_libs.py`）には
+pytest テストを用意している。push / PR 時に GitHub Actions（`.github/workflows/ci.yml`）で
+Python 3.10〜3.12 に対して自動実行される。
+
+```bash
+pip install -r requirements-dev.txt
+pytest -v
 ```
 
 ### exeビルド
