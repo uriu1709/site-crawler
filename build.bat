@@ -9,10 +9,12 @@ echo  ビルドスクリプト（exe を生成します）
 echo ==================================================
 echo.
 
-REM --- Python を探す（py ランチャー優先） ---
+REM --- 実際に動作する Python を探す（py ランチャー優先） ---
+REM Microsoft Store の python エイリアススタブは where では見つかるが実行に失敗するため、
+REM 候補を実際に走らせて検証してから採用する。
 set "PY="
-where py >nul 2>nul && set "PY=py -3"
-if not defined PY ( where python >nul 2>nul && set "PY=python" )
+where py >nul 2>nul && py -3 -c "import sys" >nul 2>nul && set "PY=py -3"
+if not defined PY ( where python >nul 2>nul && python -c "import sys" >nul 2>nul && set "PY=python" )
 if not defined PY goto :nopython
 
 echo [1/3] 仮想環境 .venv を準備しています...
