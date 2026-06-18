@@ -115,10 +115,12 @@ class _SSLAdapter(HTTPAdapter):
         kwargs['ssl_context'] = self._create_ssl_context()
         return super().init_poolmanager(*args, **kwargs)
 
-    def proxy_manager_init(self, *args, **kwargs):
-        # プロキシ経由でも同じ SSL コンテキストが適用されるようにする
-        kwargs['ssl_context'] = self._create_ssl_context()
-        return super().proxy_manager_init(*args, **kwargs)
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        # プロキシ経由のHTTPS接続でも同じ緩和SSLコンテキストを適用する。
+        # （requests はプロキシ用プールを proxy_manager_for で構築するため、
+        #  init_poolmanager だけでは直接接続にしか効かない）
+        proxy_kwargs['ssl_context'] = self._create_ssl_context()
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
 
 
 # ========================================

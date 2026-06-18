@@ -373,3 +373,17 @@ def test_version_in_content_re_multiline_banner_comment():
     m = sl.VERSION_IN_CONTENT_RE.search(banner)
     assert m is not None
     assert next((g for g in m.groups() if g), '') == '2.3.4'
+
+
+# ========================================
+# _SSLAdapter のプロキシ対応
+# ========================================
+def test_ssl_adapter_applies_context_for_proxy():
+    """proxy_manager_for 経由（プロキシHTTPS）でも緩和SSLコンテキストが渡る。"""
+    adapter = cc._SSLAdapter()
+    try:
+        mgr = adapter.proxy_manager_for('http://localhost:3128')
+        assert 'ssl_context' in mgr.connection_pool_kw
+        assert mgr.connection_pool_kw['ssl_context'] is not None
+    finally:
+        adapter.close()
