@@ -35,10 +35,15 @@ from slide_libs import detect_slide_libs
 # チェッカー本体
 # ========================================
 def run_checker(config, log_fn, done_fn, stop_event):
-    """チェッカーのGUIエントリ。ログ設定・例外処理・後始末を担い、本体は _check に委譲する。"""
-    log_fn, log_file, log_path = setup_run_logging('slidecheck', log_fn)
+    """チェッカーのGUIエントリ。ログ設定・例外処理・後始末を担い、本体は _check に委譲する。
+
+    ログ初期化（logs/ 作成・ログファイル open）自体の失敗も try 内で捕捉し、
+    例外時もログファイルを確実に閉じ done_fn を必ず呼んでGUIのボタン状態を復帰させる。
+    """
+    log_file = None
     result_csv = None
     try:
+        log_fn, log_file, log_path = setup_run_logging('slidecheck', log_fn)
         result_csv = _check(config, log_fn, log_path, stop_event)
     except Exception:
         log_fn('=' * 60)
@@ -46,8 +51,9 @@ def run_checker(config, log_fn, done_fn, stop_event):
         for line in traceback.format_exc().rstrip().splitlines():
             log_fn('  ' + line)
     finally:
-        log_file.close()
-    done_fn(result_csv)
+        if log_file is not None:
+            log_file.close()
+        done_fn(result_csv)
 
 
 def _check(config, log_fn, log_path, stop_event):

@@ -13,6 +13,7 @@ import ssl
 import sys
 import time
 import random
+import subprocess
 from datetime import datetime
 import requests
 from requests.adapters import HTTPAdapter
@@ -136,10 +137,11 @@ def extract_title(html):
 
 
 def extract_description(html):
-    m = re.search(r'<meta\s[^>]*name=["\']description["\'][^>]*content=["\']([^"\']*)["\']', html, re.IGNORECASE)
+    # 属性名と値の間の = の前後にはスペース/改行が許容されるため \s* を入れる
+    m = re.search(r'<meta\s[^>]*name\s*=\s*["\']description["\'][^>]*content\s*=\s*["\']([^"\']*)["\']', html, re.IGNORECASE)
     if m:
         return unescape(m.group(1).strip())
-    m = re.search(r'<meta\s[^>]*content=["\']([^"\']*)["\'][^>]*name=["\']description["\']', html, re.IGNORECASE)
+    m = re.search(r'<meta\s[^>]*content\s*=\s*["\']([^"\']*)["\'][^>]*name\s*=\s*["\']description["\']', html, re.IGNORECASE)
     return unescape(m.group(1).strip()) if m else ''
 
 
@@ -156,7 +158,7 @@ def extract_h1s(html):
 
 def extract_links(html, current_url, base_domain):
     links = set()
-    for href in re.findall(r'<a\s[^>]*href=["\']([^"\']+)["\']', html, re.IGNORECASE):
+    for href in re.findall(r'<a\s[^>]*href\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE):
         if href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
             continue
         abs_url = normalize_url(urljoin(current_url, href))
@@ -262,10 +264,15 @@ def fetch_with_retry(session, url, timeout_sec, retry_count, retry_delay_sec, lo
 
 
 def open_path(path):
-    """OS に応じてファイルを既定アプリで開く（Windows / macOS / Linux 対応）"""
+    """OS に応じてファイルを既定アプリで開く（Windows / macOS / Linux 対応）。
+
+    シェルを介さず引数をリストで渡すことで、パスにシェル特殊文字
+    （`"`, `;`, `&`, `|` 等）が含まれていてもコマンドインジェクションが
+    起きないようにする。
+    """
     if os.name == 'nt':
         os.startfile(path)  # type: ignore[attr-defined]
     elif sys.platform == 'darwin':
-        os.system(f'open "{path}"')
+        subprocess.Popen(['open', path])
     else:
-        os.system(f'xdg-open "{path}"')
+        subprocess.Popen(['xdg-open', path])

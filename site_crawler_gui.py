@@ -42,11 +42,13 @@ def run_crawler(config, log_fn, done_fn, stop_event):
     """クローラーのGUIエントリ。ログ設定・例外処理・後始末を担い、本体は _crawl に委譲する。
 
     本体で予期しない例外が出ても、ログファイルを確実に閉じ done_fn を必ず呼ぶことで
-    GUIのボタン状態が復帰し、エラー内容もログに残るようにする。
+    GUIのボタン状態が復帰し、エラー内容もログに残るようにする。ログ初期化
+    （logs/ 作成・ログファイル open）自体の失敗も try 内で捕捉する。
     """
-    log_fn, log_file, log_path = setup_run_logging('crawl', log_fn)
+    log_file = None
     result_csv = None
     try:
+        log_fn, log_file, log_path = setup_run_logging('crawl', log_fn)
         result_csv = _crawl(config, log_fn, log_path, stop_event)
     except Exception:
         log_fn('=' * 60)
@@ -54,8 +56,9 @@ def run_crawler(config, log_fn, done_fn, stop_event):
         for line in traceback.format_exc().rstrip().splitlines():
             log_fn('  ' + line)
     finally:
-        log_file.close()
-    done_fn(result_csv)
+        if log_file is not None:
+            log_file.close()
+        done_fn(result_csv)
 
 
 def _crawl(config, log_fn, log_path, stop_event):

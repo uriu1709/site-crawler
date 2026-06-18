@@ -85,6 +85,12 @@ def test_extract_description():
     assert cc.extract_description('<meta name="keywords" content="x">') == ''
 
 
+def test_extract_description_spaces_around_equals():
+    # = の前後にスペースがあっても抽出できる
+    html = '<meta name = "description" content = "Spaced">'
+    assert cc.extract_description(html) == 'Spaced'
+
+
 def test_extract_h1s():
     html = '<h1>First</h1><h1 class="x"> Second <span>S</span></h1><h1></h1>'
     assert cc.extract_h1s(html) == ['First', 'Second S']
@@ -117,6 +123,13 @@ def test_extract_links_relative_resolution():
     html = '<a href="sub">x</a>'
     links = cc.extract_links(html, 'https://example.com/dir/page.html', 'example.com')
     assert links == {'https://example.com/dir/sub/'}
+
+
+def test_extract_links_spaces_around_equals():
+    # href = "..." のように = の前後にスペースがあっても抽出できる
+    html = '<a href = "/about">x</a><a href ="/news/">y</a>'
+    links = cc.extract_links(html, 'https://example.com/', 'example.com')
+    assert links == {'https://example.com/about/', 'https://example.com/news/'}
 
 
 # ========================================
@@ -231,3 +244,13 @@ def test_detect_slide_libs_none():
     results = sl.detect_slide_libs(html, 'https://site.example/', session=None,
                                    timeout_sec=10, version_cache={})
     assert results == []
+
+
+def test_detect_slide_libs_spaces_around_equals():
+    """script src= の = 前後にスペースがあっても読み込みを検出できる。"""
+    html = '<script src = "https://cdn.example/swiper@8.4.5/swiper.min.js"></script>'
+    results = sl.detect_slide_libs(html, 'https://site.example/', session=None,
+                                   timeout_sec=10, version_cache={})
+    swiper = [r for r in results if r['name'] == 'Swiper']
+    assert len(swiper) == 1
+    assert swiper[0]['version'] == '8.4.5'

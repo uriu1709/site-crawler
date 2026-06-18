@@ -132,8 +132,8 @@ def detect_slide_libs(html, page_url, session, timeout_sec, version_cache):
     """
     # <script src> と <link href> を収集（絶対URLに変換）
     raw_urls = (
-        re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I) +
-        re.findall(r'<link[^>]+href=["\']([^"\']+)["\']', html, re.I)
+        re.findall(r'<script[^>]+src\s*=\s*["\']([^"\']+)["\']', html, re.I) +
+        re.findall(r'<link[^>]+href\s*=\s*["\']([^"\']+)["\']', html, re.I)
     )
     load_urls = [urljoin(page_url, u) for u in raw_urls]
 
