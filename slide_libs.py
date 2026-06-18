@@ -138,12 +138,12 @@ def detect_slide_libs(html, page_url, session, timeout_sec, version_cache):
         load_url : 検出した script src / link href の URL
     """
     # <script src> と <link href> を収集（絶対URLに変換）。
-    # クォート種別（" / '）を区別し、値内に別種クォートを含む URL でも切れないようにする。
+    # クォート種別（" / '）を区別しつつ、HTML5 のクォートなし属性値にも対応する。
     raw_urls = []
-    for g1, g2 in re.findall(r'<script[^>]+src\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', html, re.I):
-        raw_urls.append(g1 or g2)
-    for g1, g2 in re.findall(r'<link[^>]+href\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', html, re.I):
-        raw_urls.append(g1 or g2)
+    for g1, g2, g3 in re.findall(r'<script[^>]+src\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^>\s]+))', html, re.I):
+        raw_urls.append(g1 or g2 or g3)
+    for g1, g2, g3 in re.findall(r'<link[^>]+href\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^>\s]+))', html, re.I):
+        raw_urls.append(g1 or g2 or g3)
     # 属性値の前後空白を除去してから絶対URL化する（urljoin の不正生成や
     # 検出正規表現のマッチ失敗を防ぐ）
     load_urls = [urljoin(page_url, u.strip()) for u in raw_urls if u.strip()]

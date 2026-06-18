@@ -146,11 +146,13 @@ def extract_description(html):
     # content 値はクォート種別（" / '）を区別して取得し、値内に別種クォートが
     # 含まれていても（例: content="It's great"）途中で切れないようにする。
     # 属性順（name先/content先）に依存しないのも利点。
+    # HTML5 では属性値のクォートは任意（例: content=MyName）。クォートあり/なしの
+    # 両方を許容して content を取得する。
     for meta in re.findall(r'<meta\s[^>]+>', html, re.IGNORECASE):
-        if re.search(r'name\s*=\s*["\']description["\']', meta, re.IGNORECASE):
-            m = re.search(r'content\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', meta, re.IGNORECASE)
+        if re.search(r'name\s*=\s*(?:"description"|\'description\'|description\b)', meta, re.IGNORECASE):
+            m = re.search(r'content\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^>\s]+))', meta, re.IGNORECASE)
             if m:
-                return unescape((m.group(1) or m.group(2) or '').strip())
+                return unescape((m.group(1) or m.group(2) or m.group(3) or '').strip())
     return ''
 
 
@@ -168,11 +170,11 @@ def extract_h1s(html):
 def extract_links(html, current_url, base_domain):
     links = set()
     # クォート種別（" / '）を区別して取得し、値内に別種クォートを含む URL でも
-    # 途中で切れないようにする
-    for g1, g2 in re.findall(r'<a\s[^>]*href\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', html, re.IGNORECASE):
+    # 途中で切れないようにする。HTML5 のクォートなし属性値にも対応する。
+    for g1, g2, g3 in re.findall(r'<a\s[^>]*href\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^>\s]+))', html, re.IGNORECASE):
         # 属性値の前後空白を除去してから判定・結合する
         # （空白があると startswith 判定や urljoin が正しく動かないため）
-        href = (g1 or g2).strip()
+        href = (g1 or g2 or g3).strip()
         if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
             continue
         abs_url = normalize_url(urljoin(current_url, href))
@@ -228,6 +230,10 @@ def fetch_js_includes(session, html, current_url, base_domain, timeout_sec, dela
                 if normalize_url(resp.url) == normalize_url(current_url):
                     cache[abs_url] = set()
                     continue
+                # メインのクロールと同様に文字コードを補正（charset未指定時の
+                # ISO-8859-1 フォールバックによる日本語文字化けを防ぐ）
+                if resp.encoding is None or resp.encoding.lower() == 'iso-8859-1':
+                    resp.encoding = resp.apparent_encoding or 'utf-8'
                 links = extract_links(resp.text, current_url, base_domain)
                 cache[abs_url] = links
                 extra_links |= links

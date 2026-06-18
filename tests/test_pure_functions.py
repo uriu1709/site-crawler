@@ -141,6 +141,19 @@ def test_extract_links_spaces_around_equals():
     assert links == {'https://example.com/about/', 'https://example.com/news/'}
 
 
+def test_extract_links_unquoted_attribute():
+    # HTML5 のクォートなし href も抽出できる
+    html = '<a href=/about>x</a> <a href=https://example.com/news/>y</a>'
+    links = cc.extract_links(html, 'https://example.com/', 'example.com')
+    assert links == {'https://example.com/about/', 'https://example.com/news/'}
+
+
+def test_extract_description_unquoted_attribute():
+    # クォートなし content も抽出できる
+    html = '<meta name=description content=MyAwesomeSite>'
+    assert cc.extract_description(html) == 'MyAwesomeSite'
+
+
 def test_extract_links_apostrophe_in_path_not_truncated():
     # ダブルクォート href の値内にアポストロフィがあっても切れずに抽出する
     html = '<a href="/it\'s-page/">x</a>'
@@ -319,6 +332,16 @@ def test_detect_slide_libs_init_not_excluded_by_src_word_in_other_attr():
     results = sl.detect_slide_libs(html, 'https://site.example/', session=None,
                                    timeout_sec=10, version_cache={})
     assert results[0]['status'] == '初期化のみ（HTML構造なし）'
+
+
+def test_detect_slide_libs_unquoted_src():
+    """クォートなし src でもライブラリ読み込みを検出できる。"""
+    html = '<script src=https://cdn.example/swiper@8.4.5/swiper.min.js></script>'
+    results = sl.detect_slide_libs(html, 'https://site.example/', session=None,
+                                   timeout_sec=10, version_cache={})
+    swiper = [r for r in results if r['name'] == 'Swiper']
+    assert len(swiper) == 1
+    assert swiper[0]['version'] == '8.4.5'
 
 
 def test_detect_slide_libs_strips_whitespace_in_src():
