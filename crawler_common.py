@@ -234,7 +234,9 @@ def fetch_js_includes(session, html, current_url, base_domain, timeout_sec, dela
                 log_fn(f'  JSインクルード検出: {path} → リンク{len(links)}件')
             else:
                 cache[abs_url] = set()
-        except Exception:
+        except Exception as e:
+            # 取得失敗の原因を追えるようログに残す（処理は続行）
+            log_fn(f'  JSインクルード取得失敗: {path} - {e}')
             cache[abs_url] = set()
     return extra_links
 
