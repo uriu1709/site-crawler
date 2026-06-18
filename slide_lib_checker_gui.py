@@ -10,293 +10,50 @@ import threading
 import requests
 import csv
 import json
-import re
-import ssl
 import sys
 import time
-import random
 import os
-from datetime import datetime
-from requests.adapters import HTTPAdapter
-from urllib.parse import urljoin, urlparse
-from urllib.robotparser import RobotFileParser
+import traceback
+from urllib.parse import urlparse
 from collections import deque
 
-# ========================================
-# 検出対象ライブラリ定義
-#   load_re : <script src> / <link href> に含まれるパターン（読み込み検出）
-#   init_re : インライン <script> 内の初期化コード（使用検出）
-#   html_re : HTML クラス名等による使用の痕跡（使用検出）
-#   ver_re  : URL 文字列からバージョンを抽出
-# ========================================
-SLIDE_LIBS = [
-    {
-        'name':    'Swiper',
-        'load_re': re.compile(r'swiper', re.I),
-        'init_re': re.compile(r'new\s+Swiper\s*\(', re.I),
-        'html_re': re.compile(r'class=["\'][^"\']*swiper-(?:container|wrapper|slide)\b', re.I),
-        'ver_re':  re.compile(r'swiper[@/.\-]v?(\d+\.\d+[\.\d]*)', re.I),
-    },
-    {
-        'name':    'Slick',
-        'load_re': re.compile(r'slick(?:\.min)?\.(?:js|css)|jquery\.slick', re.I),
-        'init_re': re.compile(r'\.slick\s*\(', re.I),
-        'html_re': re.compile(r'class=["\'][^"\']*slick-(?:slider|list|track)\b', re.I),
-        'ver_re':  re.compile(r'slick[@/.\-]v?(\d+\.\d+[\.\d]*)', re.I),
-    },
-    {
-        'name':    'Owl Carousel',
-        'load_re': re.compile(r'owl\.carousel', re.I),
-        'init_re': re.compile(r'\.owlCarousel\s*\(', re.I),
-        'html_re': re.compile(r'class=["\'][^"\']*owl-(?:carousel|stage|item)\b', re.I),
-        'ver_re':  re.compile(r'owl[.\-]carousel[@/.\-]v?(\d+\.\d+[\.\d]*)', re.I),
-    },
-    {
-        'name':    'Splide',
-        'load_re': re.compile(r'splide', re.I),
-        'init_re': re.compile(r'new\s+Splide\s*\(', re.I),
-        'html_re': re.compile(r'class=["\'][^"\']*\bsplide\b', re.I),
-        'ver_re':  re.compile(r'splide[@/.\-]v?(\d+\.\d+[\.\d]*)', re.I),
-    },
-    {
-        'name':    'Glide.js',
-        'load_re': re.compile(r'glidejs|glide(?:\.min)?\.js|glide@\d', re.I),
-        'init_re': re.compile(r'new\s+Glide\s*\(', re.I),
-        'html_re': re.compile(r'class=["\'][^"\']*\bglide\b', re.I),
-        'ver_re':  re.compile(r'glide[@/.\-]v?(\d+\.\d+[\.\d]*)', re.I),
-    },
-    {
-        'name':    'bxSlider',
-        'load_re': re.compile(r'bxslider', re.I),
-        'init_re': re.compile(r'\.bxSlider\s*\(', re.I),
-        'html_re': re.compile(r'class=["\'][^"\']*bx-(?:wrapper|viewport|pager)\b', re.I),
-        'ver_re':  re.compile(r'bxslider[@/.\-]v?(\d+\.\d+[\.\d]*)', re.I),
-    },
-    {
-        'name':    'Flickity',
-        'load_re': re.compile(r'flickity', re.I),
-        'init_re': re.compile(r'new\s+Flickity\s*\(|\.flickity\s*\(', re.I),
-        'html_re': re.compile(r'class=["\'][^"\']*flickity-(?:viewport|slider)\b', re.I),
-        'ver_re':  re.compile(r'flickity[@/.\-]v?(\d+\.\d+[\.\d]*)', re.I),
-    },
-    {
-        'name':    'Tiny Slider',
-        'load_re': re.compile(r'tiny-?slider', re.I),
-        'init_re': re.compile(r'\btns\s*\(\s*\{', re.I),
-        'html_re': re.compile(r'class=["\'][^"\']*tns-(?:outer|inner|slider)\b', re.I),
-        'ver_re':  re.compile(r'tiny-?slider[@/.\-]v?(\d+\.\d+[\.\d]*)', re.I),
-    },
-    {
-        'name':    'lightSlider',
-        'load_re': re.compile(r'lightslider', re.I),
-        'init_re': re.compile(r'\.lightSlider\s*\(', re.I),
-        'html_re': re.compile(r'class=["\'][^"\']*lS(?:Slide|slider)\b', re.I),
-        'ver_re':  re.compile(r'lightslider[@/.\-]v?(\d+\.\d+[\.\d]*)', re.I),
-    },
-    {
-        'name':    'Keen Slider',
-        'load_re': re.compile(r'keen-slider', re.I),
-        'init_re': re.compile(r'new\s+KeenSlider\s*\(', re.I),
-        'html_re': re.compile(r'class=["\'][^"\']*\bkeen-slider\b', re.I),
-        'ver_re':  re.compile(r'keen-slider[@/.\-]v?(\d+\.\d+[\.\d]*)', re.I),
-    },
-]
-
-SKIP_EXTENSIONS = {
-    '.pdf', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg',
-    '.zip', '.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt',
-    '.mp4', '.mp3', '.mov', '.avi', '.wmv',
-    '.css', '.js', '.ico', '.woff', '.woff2', '.ttf', '.eot',
-}
-
-# JS/CSS ファイル内のバージョン文字列を探す正規表現
-# 例: /*! Swiper v8.4.5  /  version:"8.4.5"  /  e.version="8.4.5"
-VERSION_IN_CONTENT_RE = re.compile(
-    r'(?:version|VERSION)\s*[:=]\s*["\']v?(\d+\.\d+[\.\d]*)["\']'
-    r'|/\*!?\s*\S+\s+v?(\d+\.\d+[\.\d]*)',
-    re.I,
+from crawler_common import (
+    get_app_dir,
+    setup_run_logging,
+    normalize_url,
+    _SSLAdapter,
+    load_robots,
+    extract_title,
+    extract_links,
+    fetch_with_retry,
+    open_path,
 )
+from slide_libs import detect_slide_libs
 
-# ========================================
-# コアロジック（クローラー共通）
-# ========================================
-def extract_title(html):
-    from html import unescape
-    m = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
-    return unescape(m.group(1).strip()) if m else ''
-
-def fetch_lib_version(url, session, timeout_sec, cache):
-    """JS/CSS ファイルの先頭 8KB からバージョン文字列を取得（キャッシュ付き）"""
-    if url in cache:
-        return cache[url]
-    try:
-        resp = session.get(url, timeout=timeout_sec, stream=True)
-        if resp.status_code == 200:
-            chunk = b''
-            for c in resp.iter_content(8192):
-                chunk = c
-                break
-            content = chunk.decode('utf-8', errors='ignore')
-            m = VERSION_IN_CONTENT_RE.search(content)
-            version = next((g for g in m.groups() if g), '') if m else ''
-        else:
-            version = ''
-    except Exception:
-        version = ''
-    cache[url] = version
-    return version
-
-def normalize_url(url):
-    parsed = urlparse(url)
-    path = parsed.path
-    filename = path.split('/')[-1]
-    if filename and '.' not in filename and not path.endswith('/'):
-        path = path + '/'
-    return parsed._replace(path=path, query='', fragment='').geturl()
-
-def is_skip_url(url):
-    path = urlparse(url).path.lower()
-    filename = path.split('/')[-1]
-    if '.' in filename:
-        ext = '.' + filename.rsplit('.', 1)[1]
-        return ext in SKIP_EXTENSIONS
-    return False
-
-class _SSLAdapter(HTTPAdapter):
-    """古いサーバー（DH鍵サイズ不足等）にも接続できるよう SSL セキュリティレベルを緩和"""
-    def init_poolmanager(self, *args, **kwargs):
-        ctx = ssl.create_default_context()
-        ctx.set_ciphers('DEFAULT:@SECLEVEL=1')
-        kwargs['ssl_context'] = ctx
-        return super().init_poolmanager(*args, **kwargs)
-
-def load_robots(session, base_url, timeout_sec, log_fn):
-    rp = RobotFileParser()
-    robots_url = base_url.rstrip('/') + '/robots.txt'
-    rp.set_url(robots_url)
-    try:
-        resp = session.get(robots_url, timeout=timeout_sec)
-        if resp.status_code in (401, 403):
-            rp.disallow_all = True
-        elif resp.status_code >= 400:
-            rp.allow_all = True
-        else:
-            rp.parse(resp.text.splitlines())
-            log_fn(f'robots.txt読み込み完了: {robots_url}')
-    except Exception as e:
-        log_fn(f'robots.txt取得失敗（robots.txt なしとして続行）: {e}')
-        rp.allow_all = True
-    return rp
-
-def extract_links(html, current_url, base_domain):
-    links = set()
-    for href in re.findall(r'<a\s[^>]*href=["\']([^"\']+)["\']', html, re.IGNORECASE):
-        if href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
-            continue
-        abs_url = normalize_url(urljoin(current_url, href))
-        parsed  = urlparse(abs_url)
-        if parsed.netloc == base_domain and parsed.scheme in ('http', 'https'):
-            if not is_skip_url(abs_url):
-                links.add(abs_url)
-    return links
-
-def fetch_with_retry(session, url, timeout_sec, retry_count, retry_delay_sec, log_fn):
-    last_error = None
-    for attempt in range(1, retry_count + 1):
-        try:
-            resp = session.get(url, timeout=timeout_sec, allow_redirects=True)
-            if resp.status_code in (429, 503):
-                ra = resp.headers.get('Retry-After')
-                wait = int(ra) if ra and ra.isdigit() else retry_delay_sec * (2 ** (attempt - 1))
-                wait = min(wait, 120)
-                if attempt < retry_count:
-                    log_fn(f'  HTTP {resp.status_code} (試行{attempt}/{retry_count}) — {wait}秒後リトライ')
-                    time.sleep(wait)
-                    continue
-            return resp, None
-        except requests.Timeout:
-            last_error = 'TIMEOUT'
-            wait = min(retry_delay_sec * (2 ** (attempt - 1)) + random.uniform(0, 1), 60)
-            if attempt < retry_count:
-                log_fn(f'  TIMEOUT (試行{attempt}/{retry_count}) — {wait:.1f}秒後リトライ')
-                time.sleep(wait)
-            else:
-                log_fn(f'  TIMEOUT (試行{attempt}/{retry_count}、リトライ上限)')
-        except Exception as e:
-            last_error = f'ERROR: {e}'
-            wait = min(retry_delay_sec * (2 ** (attempt - 1)) + random.uniform(0, 1), 60)
-            if attempt < retry_count:
-                log_fn(f'  ERROR (試行{attempt}/{retry_count}) {e} — {wait:.1f}秒後リトライ')
-                time.sleep(wait)
-            else:
-                log_fn(f'  ERROR (試行{attempt}/{retry_count}、リトライ上限) {e}')
-    return None, last_error
-
-# ========================================
-# スライドライブラリ検出
-# ========================================
-def detect_slide_libs(html, page_url, session, timeout_sec, version_cache):
-    """
-    HTMLからスライドショーライブラリを検出する。
-
-    Returns: list of dict
-        name     : ライブラリ名
-        version  : バージョン文字列（不明の場合は空文字）
-        status   : '使用中' | '初期化のみ（HTML構造なし）' | '読み込みのみ'
-        load_url : 検出した script src / link href の URL
-    """
-    # <script src> と <link href> を収集（絶対URLに変換）
-    raw_urls = (
-        re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I) +
-        re.findall(r'<link[^>]+href=["\']([^"\']+)["\']', html, re.I)
-    )
-    load_urls = [urljoin(page_url, u) for u in raw_urls]
-
-    # インライン <script> の内容を結合（src 属性のないものだけ）
-    inline_js = '\n'.join(
-        re.findall(r'<script(?![^>]*\bsrc\b)[^>]*>(.*?)</script>', html, re.I | re.DOTALL)
-    )
-
-    results = []
-    for lib in SLIDE_LIBS:
-        # 読み込みチェック
-        matched_url = next((u for u in load_urls if lib['load_re'].search(u)), None)
-        if not matched_url:
-            continue
-
-        # バージョン抽出: まず URL から、なければファイルをフェッチ
-        m = lib['ver_re'].search(matched_url)
-        version = m.group(1) if m else ''
-        if not version:
-            version = fetch_lib_version(matched_url, session, timeout_sec, version_cache)
-
-        # 使用チェック（二段階）
-        has_init = bool(lib['init_re'].search(inline_js))
-        has_html = bool(lib['html_re'].search(html))
-
-        if has_html:
-            status = '使用中'
-        elif has_init:
-            status = '初期化のみ（HTML構造なし）'
-        else:
-            status = '読み込みのみ'
-
-        results.append({
-            'name':     lib['name'],
-            'version':  version,
-            'status':   status,
-            'load_url': matched_url,
-        })
-
-    return results
 
 # ========================================
 # チェッカー本体
 # ========================================
 def run_checker(config, log_fn, done_fn, stop_event):
+    """チェッカーのGUIエントリ。ログ設定・例外処理・後始末を担い、本体は _check に委譲する。"""
+    log_fn, log_file, log_path = setup_run_logging('slidecheck', log_fn)
+    result_csv = None
+    try:
+        result_csv = _check(config, log_fn, log_path, stop_event)
+    except Exception:
+        log_fn('=' * 60)
+        log_fn('❌ 予期しないエラーで中断しました:')
+        for line in traceback.format_exc().rstrip().splitlines():
+            log_fn('  ' + line)
+    finally:
+        log_file.close()
+    done_fn(result_csv)
+
+
+def _check(config, log_fn, log_path, stop_event):
     """
-    クローラー本体。別スレッドで実行。
-    config: dict, log_fn: ログコールバック, done_fn: 完了コールバック, stop_event: threading.Event
+    チェッカー本体。別スレッドで実行。出力CSVのパスを返す。
+    config: dict, log_fn: ログコールバック, log_path: ログファイルパス, stop_event: threading.Event
     """
     start_url       = normalize_url(config['start_url'])
     output_csv      = config['output_csv']
@@ -307,24 +64,6 @@ def run_checker(config, log_fn, done_fn, stop_event):
     retry_delay_sec = config['retry_delay_sec']
     respect_robots  = config['respect_robots']
     exclude_dirs    = config.get('exclude_dirs', [])
-
-    # ログファイル
-    if getattr(sys, 'frozen', False):
-        app_dir = os.path.dirname(sys.executable)
-    else:
-        app_dir = os.path.dirname(os.path.abspath(__file__))
-    log_dir = os.path.join(app_dir, 'logs')
-    os.makedirs(log_dir, exist_ok=True)
-    log_filename = datetime.now().strftime('slidecheck_%Y%m%d_%H%M%S.log')
-    log_path = os.path.join(log_dir, log_filename)
-    log_file = open(log_path, 'w', encoding='utf-8')
-
-    _gui_log = log_fn
-    def log_fn(text):
-        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        log_file.write(f'{ts} {text}\n')
-        log_file.flush()
-        _gui_log(text)
 
     parsed      = urlparse(start_url)
     base_domain = parsed.netloc
@@ -472,9 +211,7 @@ def run_checker(config, log_fn, done_fn, stop_event):
         log_fn('   スライドライブラリ: 検出なし')
     log_fn(f'   保存先: {output_csv}')
     log_fn(f'   ログ: {log_path}')
-
-    log_file.close()
-    done_fn(output_csv)
+    return output_csv
 
 # ========================================
 # GUI アプリ
@@ -489,10 +226,7 @@ class CheckerApp(tk.Tk):
         self._stop_event   = threading.Event()
         self._check_thread = None
 
-        if getattr(sys, 'frozen', False):
-            self._app_dir = os.path.dirname(sys.executable)
-        else:
-            self._app_dir = os.path.dirname(os.path.abspath(__file__))
+        self._app_dir = get_app_dir()
         self._config_path = os.path.join(self._app_dir, 'slidecheck_settings.json')
 
         self._build_ui()
@@ -552,9 +286,9 @@ class CheckerApp(tk.Tk):
         self.var_timeout = tk.IntVar(value=20)
         ttk.Spinbox(cfg, textvariable=self.var_timeout, from_=1, to=120, width=8).grid(row=4, column=1, sticky='w')
 
-        lbl('リトライ回数', 5)
+        lbl('試行回数（リトライ含む）', 5)
         self.var_retry = tk.IntVar(value=3)
-        ttk.Spinbox(cfg, textvariable=self.var_retry, from_=0, to=10, width=8).grid(row=5, column=1, sticky='w')
+        ttk.Spinbox(cfg, textvariable=self.var_retry, from_=1, to=10, width=8).grid(row=5, column=1, sticky='w')
 
         lbl('リトライ待機（秒）', 6)
         self.var_retry_delay = tk.DoubleVar(value=3.0)
@@ -656,22 +390,22 @@ class CheckerApp(tk.Tk):
         self.btn_stop.config(state='disabled')
 
     def _on_done(self, csv_path):
+        # csv_path が None ならエラー終了。開始ボタンは復帰させるが「CSVを開く」は無効のまま。
         self._last_csv = csv_path
         def _update():
             self.btn_start.config(state='normal')
             self.btn_stop.config(state='disabled')
-            self.btn_open.config(state='normal')
+            self.btn_open.config(state='normal' if csv_path else 'disabled')
         self.after(0, _update)
 
     def _open_csv(self):
         if self._last_csv and os.path.exists(self._last_csv):
-            os.startfile(self._last_csv) if os.name == 'nt' else os.system(f'open "{self._last_csv}"')
+            open_path(self._last_csv)
 
 # ========================================
 # エントリーポイント
 # ========================================
 if __name__ == '__main__':
-    import traceback
 
     def _handle_exception(exc_type, exc_value, exc_tb):
         msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
