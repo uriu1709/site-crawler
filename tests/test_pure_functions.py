@@ -32,6 +32,9 @@ import slide_libs as sl
     ('https://example.com/page.html?x=1', 'https://example.com/page.html'),
     # ルート
     ('https://example.com/', 'https://example.com/'),
+    # パスなしも / に統一（ルートページの重複クロール防止）
+    ('https://example.com', 'https://example.com/'),
+    ('https://example.com?a=1', 'https://example.com/'),
 ])
 def test_normalize_url(url, expected):
     assert cc.normalize_url(url) == expected
@@ -362,3 +365,11 @@ def test_version_in_content_re_library_name_with_spaces():
     # version:"x" 形式も従来通り
     m2 = sl.VERSION_IN_CONTENT_RE.search('e.version="8.4.5"')
     assert next((g for g in m2.groups() if g), '') == '8.4.5'
+
+
+def test_version_in_content_re_multiline_banner_comment():
+    """各行頭に * がある複数行バナーコメントからもバージョンを抽出できる。"""
+    banner = '/*!\n * Owl Carousel v2.3.4\n * Copyright owl\n */'
+    m = sl.VERSION_IN_CONTENT_RE.search(banner)
+    assert m is not None
+    assert next((g for g in m.groups() if g), '') == '2.3.4'

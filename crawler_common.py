@@ -69,11 +69,16 @@ def setup_run_logging(prefix, gui_log):
 def normalize_url(url):
     parsed = urlparse(url)
     path = parsed.path
-    # 拡張子のないパスは末尾スラッシュに統一（例: /international → /international/）
-    # 拡張子ありのパスはそのまま（例: /page.html はスラッシュ不要）
-    filename = path.split('/')[-1]
-    if filename and '.' not in filename and not path.endswith('/'):
-        path = path + '/'
+    if not path:
+        # パスなし（例: https://example.com）は https://example.com/ に統一し、
+        # ルートページが重複クロールされないようにする
+        path = '/'
+    else:
+        # 拡張子のないパスは末尾スラッシュに統一（例: /international → /international/）
+        # 拡張子ありのパスはそのまま（例: /page.html はスラッシュ不要）
+        filename = path.split('/')[-1]
+        if filename and '.' not in filename and not path.endswith('/'):
+            path = path + '/'
     return parsed._replace(path=path, query='', fragment='').geturl()
 
 
@@ -96,7 +101,7 @@ def get_path_segments(url):
 # ========================================
 class _SSLAdapter(HTTPAdapter):
     """古いサーバー（DH鍵サイズ不足等）にも接続できるよう SSL セキュリティレベルを緩和"""
-    def init_poolmanager(self, *args, **kwargs):
+    def _create_ssl_context(self):
         ctx = ssl.create_default_context()
         # LibreSSL（macOS 等）は @SECLEVEL 指定をサポートせず SSLError になるため、
         # 失敗時は通常の DEFAULT 暗号スイートにフォールバックする
@@ -104,8 +109,16 @@ class _SSLAdapter(HTTPAdapter):
             ctx.set_ciphers('DEFAULT:@SECLEVEL=1')
         except ssl.SSLError:
             ctx.set_ciphers('DEFAULT')
-        kwargs['ssl_context'] = ctx
+        return ctx
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs['ssl_context'] = self._create_ssl_context()
         return super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_init(self, *args, **kwargs):
+        # プロキシ経由でも同じ SSL コンテキストが適用されるようにする
+        kwargs['ssl_context'] = self._create_ssl_context()
+        return super().proxy_manager_init(*args, **kwargs)
 
 
 # ========================================
@@ -304,8 +317,10 @@ def open_path(path):
         if os.name == 'nt':
             os.startfile(abs_path)  # type: ignore[attr-defined]
         elif sys.platform == 'darwin':
-            subprocess.Popen(['open', abs_path])
+            subprocess.Popen(['open', abs_path],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            subprocess.Popen(['xdg-open', abs_path])
+            subprocess.Popen(['xdg-open', abs_path],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
