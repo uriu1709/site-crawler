@@ -91,6 +91,15 @@ def test_extract_description_spaces_around_equals():
     assert cc.extract_description(html) == 'Spaced'
 
 
+def test_extract_description_with_apostrophe():
+    # content 値内にアポストロフィがあっても途中で切れない
+    html = '<meta name="description" content="It\'s a great site">'
+    assert cc.extract_description(html) == "It's a great site"
+    # シングルクォートで囲み、値内にダブルクォート
+    html2 = '<meta name=\'description\' content=\'Say "hi" now\'>'
+    assert cc.extract_description(html2) == 'Say "hi" now'
+
+
 def test_extract_h1s():
     html = '<h1>First</h1><h1 class="x"> Second <span>S</span></h1><h1></h1>'
     assert cc.extract_h1s(html) == ['First', 'Second S']
@@ -130,6 +139,13 @@ def test_extract_links_spaces_around_equals():
     html = '<a href = "/about">x</a><a href ="/news/">y</a>'
     links = cc.extract_links(html, 'https://example.com/', 'example.com')
     assert links == {'https://example.com/about/', 'https://example.com/news/'}
+
+
+def test_extract_links_apostrophe_in_path_not_truncated():
+    # ダブルクォート href の値内にアポストロフィがあっても切れずに抽出する
+    html = '<a href="/it\'s-page/">x</a>'
+    links = cc.extract_links(html, 'https://example.com/', 'example.com')
+    assert links == {"https://example.com/it's-page/"}
 
 
 def test_extract_links_strips_whitespace_in_value():

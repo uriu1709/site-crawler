@@ -137,11 +137,13 @@ def detect_slide_libs(html, page_url, session, timeout_sec, version_cache):
         status   : '使用中' | '初期化のみ（HTML構造なし）' | '読み込みのみ'
         load_url : 検出した script src / link href の URL
     """
-    # <script src> と <link href> を収集（絶対URLに変換）
-    raw_urls = (
-        re.findall(r'<script[^>]+src\s*=\s*["\']([^"\']+)["\']', html, re.I) +
-        re.findall(r'<link[^>]+href\s*=\s*["\']([^"\']+)["\']', html, re.I)
-    )
+    # <script src> と <link href> を収集（絶対URLに変換）。
+    # クォート種別（" / '）を区別し、値内に別種クォートを含む URL でも切れないようにする。
+    raw_urls = []
+    for g1, g2 in re.findall(r'<script[^>]+src\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', html, re.I):
+        raw_urls.append(g1 or g2)
+    for g1, g2 in re.findall(r'<link[^>]+href\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', html, re.I):
+        raw_urls.append(g1 or g2)
     # 属性値の前後空白を除去してから絶対URL化する（urljoin の不正生成や
     # 検出正規表現のマッチ失敗を防ぐ）
     load_urls = [urljoin(page_url, u.strip()) for u in raw_urls if u.strip()]

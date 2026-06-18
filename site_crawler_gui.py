@@ -50,6 +50,10 @@ def run_crawler(config, log_fn, done_fn, stop_event):
     try:
         log_fn, log_file, log_path = setup_run_logging('crawl', log_fn)
         result_csv = _crawl(config, log_fn, log_path, stop_event)
+    except PermissionError as e:
+        log_fn('=' * 60)
+        log_fn('❌ CSVファイルに書き込めません。ファイルが他のプログラム（Excel等）で開かれている可能性があります:')
+        log_fn(f'  {e}')
     except Exception:
         log_fn('=' * 60)
         log_fn('❌ 予期しないエラーで中断しました:')

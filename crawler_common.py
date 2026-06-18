@@ -98,7 +98,12 @@ class _SSLAdapter(HTTPAdapter):
     """古いサーバー（DH鍵サイズ不足等）にも接続できるよう SSL セキュリティレベルを緩和"""
     def init_poolmanager(self, *args, **kwargs):
         ctx = ssl.create_default_context()
-        ctx.set_ciphers('DEFAULT:@SECLEVEL=1')
+        # LibreSSL（macOS 等）は @SECLEVEL 指定をサポートせず SSLError になるため、
+        # 失敗時は通常の DEFAULT 暗号スイートにフォールバックする
+        try:
+            ctx.set_ciphers('DEFAULT:@SECLEVEL=1')
+        except ssl.SSLError:
+            ctx.set_ciphers('DEFAULT')
         kwargs['ssl_context'] = ctx
         return super().init_poolmanager(*args, **kwargs)
 
@@ -137,12 +142,16 @@ def extract_title(html):
 
 
 def extract_description(html):
-    # 属性名と値の間の = の前後にはスペース/改行が許容されるため \s* を入れる
-    m = re.search(r'<meta\s[^>]*name\s*=\s*["\']description["\'][^>]*content\s*=\s*["\']([^"\']*)["\']', html, re.IGNORECASE)
-    if m:
-        return unescape(m.group(1).strip())
-    m = re.search(r'<meta\s[^>]*content\s*=\s*["\']([^"\']*)["\'][^>]*name\s*=\s*["\']description["\']', html, re.IGNORECASE)
-    return unescape(m.group(1).strip()) if m else ''
+    # <meta> タグ単位で走査し、name=description のタグから content を取り出す。
+    # content 値はクォート種別（" / '）を区別して取得し、値内に別種クォートが
+    # 含まれていても（例: content="It's great"）途中で切れないようにする。
+    # 属性順（name先/content先）に依存しないのも利点。
+    for meta in re.findall(r'<meta\s[^>]+>', html, re.IGNORECASE):
+        if re.search(r'name\s*=\s*["\']description["\']', meta, re.IGNORECASE):
+            m = re.search(r'content\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', meta, re.IGNORECASE)
+            if m:
+                return unescape((m.group(1) or m.group(2) or '').strip())
+    return ''
 
 
 def extract_h1s(html):
@@ -158,10 +167,12 @@ def extract_h1s(html):
 
 def extract_links(html, current_url, base_domain):
     links = set()
-    for href in re.findall(r'<a\s[^>]*href\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE):
+    # クォート種別（" / '）を区別して取得し、値内に別種クォートを含む URL でも
+    # 途中で切れないようにする
+    for g1, g2 in re.findall(r'<a\s[^>]*href\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', html, re.IGNORECASE):
         # 属性値の前後空白を除去してから判定・結合する
         # （空白があると startswith 判定や urljoin が正しく動かないため）
-        href = href.strip()
+        href = (g1 or g2).strip()
         if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
             continue
         abs_url = normalize_url(urljoin(current_url, href))
@@ -277,14 +288,16 @@ def open_path(path):
     シェルを介さず引数をリストで渡すことで、パスにシェル特殊文字
     （`"`, `;`, `&`, `|` 等）が含まれていてもコマンドインジェクションが
     起きないようにする。xdg-open 等が存在しない環境でも例外で落ちないよう
-    OSError は握りつぶす。
+    OSError は握りつぶす。相対パス／カレントディレクトリ変更時にも確実に
+    開けるよう絶対パスへ変換する。
     """
     try:
+        abs_path = os.path.abspath(path)
         if os.name == 'nt':
-            os.startfile(path)  # type: ignore[attr-defined]
+            os.startfile(abs_path)  # type: ignore[attr-defined]
         elif sys.platform == 'darwin':
-            subprocess.Popen(['open', path])
+            subprocess.Popen(['open', abs_path])
         else:
-            subprocess.Popen(['xdg-open', path])
+            subprocess.Popen(['xdg-open', abs_path])
     except OSError:
         pass
