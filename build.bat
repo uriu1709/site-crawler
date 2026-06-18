@@ -20,17 +20,22 @@ if not exist ".venv\Scripts\python.exe" (
     %PY% -m venv .venv
     if errorlevel 1 goto :venvfail
 )
-call ".venv\Scripts\activate.bat"
+REM activate.bat に頼らず venv の実行ファイルを直接呼ぶ（PATH書き換え不要で安定）
+set "VENV_PY=.venv\Scripts\python.exe"
 
 echo [2/3] 必要なパッケージをインストールしています...
-python -m pip install --upgrade pip >nul
-python -m pip install -r requirements.txt pyinstaller
+"%VENV_PY%" -m pip install --upgrade pip >nul
+"%VENV_PY%" -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 goto :pipfail
 
 echo [3/3] exe をビルドしています（数分かかる場合があります）...
+if not exist "*.spec" (
+    echo [エラー] .spec ファイルが見つかりません。このフォルダで実行してください。
+    goto :fail
+)
 for %%f in (*.spec) do (
     echo     - %%f
-    pyinstaller --noconfirm --clean "%%f"
+    "%VENV_PY%" -m PyInstaller --noconfirm --clean "%%f"
     if errorlevel 1 goto :buildfail
 )
 
@@ -42,7 +47,7 @@ echo      dist\サイトクローラー.exe
 echo      dist\スライドライブラリチェッカー.exe
 echo ==================================================
 echo.
-if exist "dist" explorer "dist"
+if exist "%~dp0dist" start "" "%~dp0dist"
 echo 何かキーを押すと終了します。
 pause >nul
 goto :eof
