@@ -132,6 +132,23 @@ def test_extract_links_spaces_around_equals():
     assert links == {'https://example.com/about/', 'https://example.com/news/'}
 
 
+def test_extract_links_strips_whitespace_in_value():
+    # 属性値の前後に空白がある場合も strip して正しく判定・結合する
+    html = '<a href="  /about  ">x</a><a href=" mailto:a@b.com ">m</a><a href="   ">empty</a>'
+    links = cc.extract_links(html, 'https://example.com/', 'example.com')
+    assert links == {'https://example.com/about/'}
+
+
+def test_open_path_swallows_oserror(monkeypatch):
+    # xdg-open 等が無く Popen が OSError を投げても open_path は例外を出さない
+    def _raise(*a, **k):
+        raise FileNotFoundError('no opener')
+    monkeypatch.setattr(cc.subprocess, 'Popen', _raise)
+    monkeypatch.setattr(cc.os, 'startfile', _raise, raising=False)
+    # 例外が送出されないことを確認（戻り値は None）
+    assert cc.open_path('/tmp/whatever.csv') is None
+
+
 # ========================================
 # detect_js_includes
 # ========================================
@@ -254,3 +271,24 @@ def test_detect_slide_libs_spaces_around_equals():
     swiper = [r for r in results if r['name'] == 'Swiper']
     assert len(swiper) == 1
     assert swiper[0]['version'] == '8.4.5'
+
+
+def test_detect_slide_libs_init_not_excluded_by_src_word_in_other_attr():
+    """他属性に src という単語を含むインラインscriptでも初期化を検出する。"""
+    html = '''
+        <script src="https://cdn.example/swiper@8.0.0/swiper.min.js"></script>
+        <script id="src-loader">new Swiper('.foo', {});</script>
+    '''
+    results = sl.detect_slide_libs(html, 'https://site.example/', session=None,
+                                   timeout_sec=10, version_cache={})
+    assert results[0]['status'] == '初期化のみ（HTML構造なし）'
+
+
+def test_version_in_content_re_library_name_with_spaces():
+    """コメントのライブラリ名にスペースが含まれてもバージョンを抽出できる。"""
+    m = sl.VERSION_IN_CONTENT_RE.search('/*! Owl Carousel v2.3.4 */')
+    assert m is not None
+    assert next((g for g in m.groups() if g), '') == '2.3.4'
+    # version:"x" 形式も従来通り
+    m2 = sl.VERSION_IN_CONTENT_RE.search('e.version="8.4.5"')
+    assert next((g for g in m2.groups() if g), '') == '8.4.5'

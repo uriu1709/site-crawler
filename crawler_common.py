@@ -159,7 +159,10 @@ def extract_h1s(html):
 def extract_links(html, current_url, base_domain):
     links = set()
     for href in re.findall(r'<a\s[^>]*href\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE):
-        if href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+        # 属性値の前後空白を除去してから判定・結合する
+        # （空白があると startswith 判定や urljoin が正しく動かないため）
+        href = href.strip()
+        if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
             continue
         abs_url = normalize_url(urljoin(current_url, href))
         parsed = urlparse(abs_url)
@@ -268,11 +271,15 @@ def open_path(path):
 
     シェルを介さず引数をリストで渡すことで、パスにシェル特殊文字
     （`"`, `;`, `&`, `|` 等）が含まれていてもコマンドインジェクションが
-    起きないようにする。
+    起きないようにする。xdg-open 等が存在しない環境でも例外で落ちないよう
+    OSError は握りつぶす。
     """
-    if os.name == 'nt':
-        os.startfile(path)  # type: ignore[attr-defined]
-    elif sys.platform == 'darwin':
-        subprocess.Popen(['open', path])
-    else:
-        subprocess.Popen(['xdg-open', path])
+    try:
+        if os.name == 'nt':
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', path])
+        else:
+            subprocess.Popen(['xdg-open', path])
+    except OSError:
+        pass

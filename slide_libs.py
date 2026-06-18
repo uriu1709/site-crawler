@@ -92,9 +92,11 @@ SLIDE_LIBS = [
 
 # JS/CSS ファイル内のバージョン文字列を探す正規表現
 # 例: /*! Swiper v8.4.5  /  version:"8.4.5"  /  e.version="8.4.5"
+# 2つ目のパターンは [^*]+? を使い、"Owl Carousel" 等スペースを含む
+# ライブラリ名のコメントでもコメント終端(*)を超えずにバージョンを抽出する。
 VERSION_IN_CONTENT_RE = re.compile(
-    r'(?:version|VERSION)\s*[:=]\s*["\']v?(\d+\.\d+[\.\d]*)["\']'
-    r'|/\*!?\s*\S+\s+v?(\d+\.\d+[\.\d]*)',
+    r'(?:version|VERSION)\s*[:=]\s*["\']v?(\d+\.\d+[.\d]*)["\']'
+    r'|/\*!?\s*[^*]+?\s+v?(\d+\.\d+[.\d]*)',
     re.I,
 )
 
@@ -138,8 +140,10 @@ def detect_slide_libs(html, page_url, session, timeout_sec, version_cache):
     load_urls = [urljoin(page_url, u) for u in raw_urls]
 
     # インライン <script> の内容を結合（src 属性のないものだけ）
+    # \s+src\s*= で実際の src 属性のみを除外条件にする（id="src-..." 等の
+    # 単語 src を含む他属性での誤除外を防ぐ）。
     inline_js = '\n'.join(
-        re.findall(r'<script(?![^>]*\bsrc\b)[^>]*>(.*?)</script>', html, re.I | re.DOTALL)
+        re.findall(r'<script(?![^>]*\s+src\s*=)[^>]*>(.*?)</script>', html, re.I | re.DOTALL)
     )
 
     results = []
