@@ -11,200 +11,64 @@ import requests
 import csv
 import json
 import re
-import ssl
 import sys
 import time
-import random
 import os
-from datetime import datetime
-from requests.adapters import HTTPAdapter
-from urllib.parse import urljoin, urlparse
-from urllib.robotparser import RobotFileParser
-from html import unescape
+import traceback
+from urllib.parse import urlparse
 from collections import deque
 
+from crawler_common import (
+    get_app_dir,
+    setup_run_logging,
+    normalize_url,
+    _SSLAdapter,
+    load_robots,
+    extract_title,
+    extract_description,
+    extract_h1s,
+    extract_links,
+    fetch_js_includes,
+    get_path_segments,
+    fetch_with_retry,
+    open_path,
+)
+
+
 # ========================================
-# スキップする拡張子
+# クローラー本体
 # ========================================
-SKIP_EXTENSIONS = {
-    '.pdf', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg',
-    '.zip', '.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt',
-    '.mp4', '.mp3', '.mov', '.avi', '.wmv',
-    '.css', '.js', '.ico', '.woff', '.woff2', '.ttf', '.eot',
-}
-
-# ========================================
-# クローラーロジック
-# ========================================
-def normalize_url(url):
-    parsed = urlparse(url)
-    path = parsed.path
-    # 拡張子のないパスは末尾スラッシュに統一（例: /international → /international/）
-    # 拡張子ありのパスはそのまま（例: /page.html はスラッシュ不要）
-    filename = path.split('/')[-1]
-    if filename and '.' not in filename and not path.endswith('/'):
-        path = path + '/'
-    return parsed._replace(path=path, query='', fragment='').geturl()
-
-def is_skip_url(url):
-    path = urlparse(url).path.lower()
-    filename = path.split('/')[-1]
-    if '.' in filename:
-        ext = '.' + filename.rsplit('.', 1)[1]
-        return ext in SKIP_EXTENSIONS
-    return False
-
-class _SSLAdapter(HTTPAdapter):
-    """古いサーバー（DH鍵サイズ不足等）にも接続できるよう SSL セキュリティレベルを緩和"""
-    def init_poolmanager(self, *args, **kwargs):
-        ctx = ssl.create_default_context()
-        ctx.set_ciphers('DEFAULT:@SECLEVEL=1')
-        kwargs['ssl_context'] = ctx
-        return super().init_poolmanager(*args, **kwargs)
-
-def load_robots(session, base_url, timeout_sec, log_fn):
-    """requests セッションで robots.txt を取得し解析する"""
-    rp = RobotFileParser()
-    robots_url = base_url.rstrip('/') + '/robots.txt'
-    rp.set_url(robots_url)
-    try:
-        resp = session.get(robots_url, timeout=timeout_sec)
-        if resp.status_code in (401, 403):
-            log_fn(f'robots.txt: HTTP {resp.status_code} — 全URLが禁止として扱われます')
-            rp.disallow_all = True
-        elif resp.status_code >= 400:
-            log_fn(f'robots.txt: HTTP {resp.status_code} — robots.txt なしとして続行')
-            rp.allow_all = True
-        else:
-            rp.parse(resp.text.splitlines())
-            log_fn(f'robots.txt読み込み完了: {robots_url}')
-    except Exception as e:
-        log_fn(f'robots.txt取得失敗（robots.txt なしとして続行）: {e}')
-        rp.allow_all = True
-    return rp
-
-def extract_title(html):
-    m = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
-    return unescape(m.group(1).strip()) if m else ''
-
-def extract_description(html):
-    m = re.search(r'<meta\s[^>]*name=["\']description["\'][^>]*content=["\']([^"\']*)["\']', html, re.IGNORECASE)
-    if m: return unescape(m.group(1).strip())
-    m = re.search(r'<meta\s[^>]*content=["\']([^"\']*)["\'][^>]*name=["\']description["\']', html, re.IGNORECASE)
-    return unescape(m.group(1).strip()) if m else ''
-
-def extract_h1s(html):
-    matches = re.findall(r'<h1[^>]*>(.*?)</h1>', html, re.IGNORECASE | re.DOTALL)
-    cleaned = []
-    for m in matches:
-        text = re.sub(r'<[^>]+>', '', m).strip()
-        text = unescape(re.sub(r'\s+', ' ', text))
-        if text:
-            cleaned.append(text)
-    return cleaned
-
-def extract_links(html, current_url, base_domain):
-    links = set()
-    for href in re.findall(r'<a\s[^>]*href=["\']([^"\']+)["\']', html, re.IGNORECASE):
-        if href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
-            continue
-        abs_url = normalize_url(urljoin(current_url, href))
-        parsed  = urlparse(abs_url)
-        if parsed.netloc == base_domain and parsed.scheme in ('http', 'https'):
-            if not is_skip_url(abs_url):
-                links.add(abs_url)
-    return links
-
-def detect_js_includes(html):
-    """HTMLからJSインクルードパターン（.load(), fetch()等）のパスを検出"""
-    paths = set()
-    # jQuery .load("path") パターン
-    for m in re.findall(r'\.load\(\s*["\']([^"\']+)["\']', html):
-        if m.endswith(('.html', '.htm', '.php', '.shtml')):
-            paths.add(m)
-    # fetch("path") パターン
-    for m in re.findall(r'fetch\(\s*["\']([^"\']+)["\']', html):
-        if m.endswith(('.html', '.htm', '.php', '.shtml')):
-            paths.add(m)
-    return paths
-
-
-def fetch_js_includes(session, html, current_url, base_domain, timeout_sec, delay_sec, cache, log_fn):
-    """JSインクルードファイルを取得し、追加リンクを抽出して返す"""
-    include_paths = detect_js_includes(html)
-    if not include_paths:
-        return set()
-
-    extra_links = set()
-    for path in include_paths:
-        abs_url = urljoin(current_url, path)
-        if abs_url in cache:
-            # キャッシュ済みのリンクを再利用
-            extra_links |= cache[abs_url]
-            continue
-        try:
-            time.sleep(delay_sec)
-            resp = session.get(abs_url, timeout=timeout_sec,
-                               headers={'X-Requested-With': 'XMLHttpRequest',
-                                        'Referer': current_url})
-            if resp.status_code == 200 and 'text/html' in resp.headers.get('Content-Type', ''):
-                # リダイレクトで元ページに戻された場合はスキップ
-                if normalize_url(resp.url) == normalize_url(current_url):
-                    cache[abs_url] = set()
-                    continue
-                links = extract_links(resp.text, current_url, base_domain)
-                cache[abs_url] = links
-                extra_links |= links
-                log_fn(f'  JSインクルード検出: {path} → リンク{len(links)}件')
-            else:
-                cache[abs_url] = set()
-        except Exception:
-            cache[abs_url] = set()
-    return extra_links
-
-
-def get_path_segments(url):
-    path = urlparse(url).path
-    return [s for s in path.strip('/').split('/') if s]
-
-def fetch_with_retry(session, url, timeout_sec, retry_count, retry_delay_sec, log_fn):
-    last_error = None
-    for attempt in range(1, retry_count + 1):
-        try:
-            resp = session.get(url, timeout=timeout_sec, allow_redirects=True)
-            # 429/503 は Retry-After ヘッダがあれば従い、なければ指数バックオフ
-            if resp.status_code in (429, 503):
-                ra = resp.headers.get('Retry-After')
-                wait = int(ra) if ra and ra.isdigit() else retry_delay_sec * (2 ** (attempt - 1))
-                wait = min(wait, 120)
-                if attempt < retry_count:
-                    log_fn(f'  HTTP {resp.status_code} (試行{attempt}/{retry_count}) — {wait}秒後リトライ')
-                    time.sleep(wait)
-                    continue
-            return resp, None
-        except requests.Timeout:
-            last_error = 'TIMEOUT'
-            wait = min(retry_delay_sec * (2 ** (attempt - 1)) + random.uniform(0, 1), 60)
-            if attempt < retry_count:
-                log_fn(f'  TIMEOUT (試行{attempt}/{retry_count}) — {wait:.1f}秒後リトライ')
-                time.sleep(wait)
-            else:
-                log_fn(f'  TIMEOUT (試行{attempt}/{retry_count}、リトライ上限)')
-        except Exception as e:
-            last_error = f'ERROR: {e}'
-            wait = min(retry_delay_sec * (2 ** (attempt - 1)) + random.uniform(0, 1), 60)
-            if attempt < retry_count:
-                log_fn(f'  ERROR (試行{attempt}/{retry_count}) {e} — {wait:.1f}秒後リトライ')
-                time.sleep(wait)
-            else:
-                log_fn(f'  ERROR (試行{attempt}/{retry_count}、リトライ上限) {e}')
-    return None, last_error
-
-
 def run_crawler(config, log_fn, done_fn, stop_event):
+    """クローラーのGUIエントリ。ログ設定・例外処理・後始末を担い、本体は _crawl に委譲する。
+
+    本体で予期しない例外が出ても、ログファイルを確実に閉じ done_fn を必ず呼ぶことで
+    GUIのボタン状態が復帰し、エラー内容もログに残るようにする。ログ初期化
+    （logs/ 作成・ログファイル open）自体の失敗も try 内で捕捉する。
     """
-    クローラー本体。別スレッドで実行。
-    config: dict, log_fn: ログ出力コールバック, done_fn: 完了コールバック, stop_event: threading.Event
+    log_file = None
+    result_csv = None
+    try:
+        log_fn, log_file, log_path = setup_run_logging('crawl', log_fn)
+        result_csv = _crawl(config, log_fn, log_path, stop_event)
+    except PermissionError as e:
+        log_fn('=' * 60)
+        log_fn('❌ CSVファイルに書き込めません。ファイルが他のプログラム（Excel等）で開かれている可能性があります:')
+        log_fn(f'  {e}')
+    except Exception:
+        log_fn('=' * 60)
+        log_fn('❌ 予期しないエラーで中断しました:')
+        for line in traceback.format_exc().rstrip().splitlines():
+            log_fn('  ' + line)
+    finally:
+        if log_file is not None:
+            log_file.close()
+        done_fn(result_csv)
+
+
+def _crawl(config, log_fn, log_path, stop_event):
+    """
+    クローラー本体。別スレッドで実行。出力CSVのパスを返す。
+    config: dict, log_fn: ログ出力コールバック, log_path: ログファイルパス, stop_event: threading.Event
     """
     start_url       = normalize_url(config['start_url'])
     output_csv      = config['output_csv']
@@ -218,24 +82,6 @@ def run_crawler(config, log_fn, done_fn, stop_event):
     collapse_dirs   = config.get('collapse_dirs', [])
     wp_auto_detect  = config.get('wp_auto_detect', False)
     skip_pagination = config.get('skip_pagination', False)
-
-    # ログファイル設定（exeと同じ場所の logs/ に日時付きで保存）
-    if getattr(sys, 'frozen', False):
-        app_dir = os.path.dirname(sys.executable)
-    else:
-        app_dir = os.path.dirname(os.path.abspath(__file__))
-    log_dir = os.path.join(app_dir, 'logs')
-    os.makedirs(log_dir, exist_ok=True)
-    log_filename = datetime.now().strftime('crawl_%Y%m%d_%H%M%S.log')
-    log_path = os.path.join(log_dir, log_filename)
-    log_file = open(log_path, 'w', encoding='utf-8')
-
-    _gui_log = log_fn
-    def log_fn(text):
-        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        log_file.write(f'{ts} {text}\n')
-        log_file.flush()
-        _gui_log(text)
 
     parsed      = urlparse(start_url)
     base_domain = parsed.netloc
@@ -464,9 +310,7 @@ def run_crawler(config, log_fn, done_fn, stop_event):
     log_fn(f'   パス最大深度: {max_depth}階層 → seg0〜seg{max_depth} 列')
     log_fn(f'   保存先: {output_csv}')
     log_fn(f'   ログ: {log_path}')
-
-    log_file.close()
-    done_fn(output_csv)
+    return output_csv
 
 
 # ========================================
@@ -483,10 +327,7 @@ class CrawlerApp(tk.Tk):
         self._crawl_thread = None
 
         # アプリケーションディレクトリ（exeまたはスクリプトと同じ場所）
-        if getattr(sys, 'frozen', False):
-            self._app_dir = os.path.dirname(sys.executable)
-        else:
-            self._app_dir = os.path.dirname(os.path.abspath(__file__))
+        self._app_dir = get_app_dir()
         self._config_path = os.path.join(self._app_dir, 'crawler_settings.json')
 
         self._build_ui()
@@ -573,9 +414,9 @@ class CrawlerApp(tk.Tk):
         ttk.Spinbox(cfg_frame, textvariable=self.var_timeout, from_=1, to=120, width=8).grid(row=4, column=1, sticky='w')
 
         # RETRY_COUNT / RETRY_DELAY
-        row_label(cfg_frame, 'リトライ回数', 5)
+        row_label(cfg_frame, '試行回数（リトライ含む）', 5)
         self.var_retry = tk.IntVar(value=3)
-        ttk.Spinbox(cfg_frame, textvariable=self.var_retry, from_=0, to=10, width=8).grid(row=5, column=1, sticky='w')
+        ttk.Spinbox(cfg_frame, textvariable=self.var_retry, from_=1, to=10, width=8).grid(row=5, column=1, sticky='w')
 
         row_label(cfg_frame, 'リトライ待機（秒）', 6)
         self.var_retry_delay = tk.DoubleVar(value=3.0)
@@ -722,25 +563,25 @@ class CrawlerApp(tk.Tk):
 
     # ---------- 完了コールバック ----------
     def _on_done(self, csv_path):
+        # csv_path が None の場合はエラー終了。開始ボタンは復帰させるが
+        # 「CSVを開く」は有効化しない。
         self._last_csv = csv_path
         def _update():
             self.btn_start.config(state='normal')
             self.btn_stop.config(state='disabled')
-            self.btn_open.config(state='normal')
+            self.btn_open.config(state='normal' if csv_path else 'disabled')
         self.after(0, _update)
 
     # ---------- CSVを開く ----------
     def _open_csv(self):
         if self._last_csv and os.path.exists(self._last_csv):
-            os.startfile(self._last_csv) if os.name == 'nt' else os.system(f'open "{self._last_csv}"')
+            open_path(self._last_csv)
 
 
 # ========================================
 # エントリーポイント
 # ========================================
 if __name__ == '__main__':
-    import sys
-    import traceback
 
     def _handle_exception(exc_type, exc_value, exc_tb):
         msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
