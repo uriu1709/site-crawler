@@ -198,6 +198,11 @@ def fetch_js_includes(session, html, current_url, base_domain, timeout_sec, dela
     extra_links = set()
     for path in include_paths:
         abs_url = urljoin(current_url, path)
+        # 同一ドメイン・http(s) のみ取得する（外部絶対URLへの
+        # 意図しないリクエスト＝SSRF/情報漏洩を防ぐ）
+        parsed_abs = urlparse(abs_url)
+        if parsed_abs.netloc != base_domain or parsed_abs.scheme not in ('http', 'https'):
+            continue
         if abs_url in cache:
             # キャッシュ済みのリンクを再利用
             extra_links |= cache[abs_url]

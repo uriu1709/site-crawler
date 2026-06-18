@@ -109,10 +109,15 @@ def fetch_lib_version(url, session, timeout_sec, cache):
     try:
         with session.get(url, timeout=timeout_sec, stream=True) as resp:
             if resp.status_code == 200:
-                chunk = b''
-                for c in resp.iter_content(8192):
-                    chunk = c
-                    break
+                # 最初の1チャンクが 8192B 未満になる場合に備え、最大8192Bまで蓄積する
+                chunks = []
+                bytes_read = 0
+                for c in resp.iter_content(chunk_size=4096):
+                    chunks.append(c)
+                    bytes_read += len(c)
+                    if bytes_read >= 8192:
+                        break
+                chunk = b''.join(chunks)[:8192]
                 content = chunk.decode('utf-8', errors='ignore')
                 m = VERSION_IN_CONTENT_RE.search(content)
                 version = next((g for g in m.groups() if g), '') if m else ''
@@ -137,7 +142,9 @@ def detect_slide_libs(html, page_url, session, timeout_sec, version_cache):
         re.findall(r'<script[^>]+src\s*=\s*["\']([^"\']+)["\']', html, re.I) +
         re.findall(r'<link[^>]+href\s*=\s*["\']([^"\']+)["\']', html, re.I)
     )
-    load_urls = [urljoin(page_url, u) for u in raw_urls]
+    # 属性値の前後空白を除去してから絶対URL化する（urljoin の不正生成や
+    # 検出正規表現のマッチ失敗を防ぐ）
+    load_urls = [urljoin(page_url, u.strip()) for u in raw_urls if u.strip()]
 
     # インライン <script> の内容を結合（src 属性のないものだけ）
     # \s+src\s*= で実際の src 属性のみを除外条件にする（id="src-..." 等の

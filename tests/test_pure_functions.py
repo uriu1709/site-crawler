@@ -152,6 +152,27 @@ def test_open_path_swallows_oserror(monkeypatch):
 # ========================================
 # detect_js_includes
 # ========================================
+class _RecordingSession:
+    """session.get の呼び出しURLを記録するだけのフェイク。"""
+    def __init__(self):
+        self.requested = []
+
+    def get(self, url, **kw):
+        self.requested.append(url)
+        raise AssertionError('should not be called for external URL')
+
+
+def test_fetch_js_includes_skips_external_domain():
+    """JSインクルードが外部絶対URLを指す場合はリクエストしない（SSRF防止）。"""
+    html = '$(x).load("https://evil.example/page.html");'
+    sess = _RecordingSession()
+    extra = cc.fetch_js_includes(
+        sess, html, 'https://site.example/', 'site.example',
+        timeout_sec=10, delay_sec=0, cache={}, log_fn=lambda *_: None)
+    assert extra == set()
+    assert sess.requested == []
+
+
 def test_detect_js_includes():
     html = '''
         $("#header").load("/partials/header.html");
@@ -282,6 +303,16 @@ def test_detect_slide_libs_init_not_excluded_by_src_word_in_other_attr():
     results = sl.detect_slide_libs(html, 'https://site.example/', session=None,
                                    timeout_sec=10, version_cache={})
     assert results[0]['status'] == '初期化のみ（HTML構造なし）'
+
+
+def test_detect_slide_libs_strips_whitespace_in_src():
+    """src 属性値の前後に空白があっても読み込み・バージョン抽出ができる。"""
+    html = '<script src="  https://cdn.example/swiper@8.4.5/swiper.min.js  "></script>'
+    results = sl.detect_slide_libs(html, 'https://site.example/', session=None,
+                                   timeout_sec=10, version_cache={})
+    swiper = [r for r in results if r['name'] == 'Swiper']
+    assert len(swiper) == 1
+    assert swiper[0]['version'] == '8.4.5'
 
 
 def test_version_in_content_re_library_name_with_spaces():
